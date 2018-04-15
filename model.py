@@ -1,58 +1,68 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+'''
+    The activation, dropout, etc. Modules in torch.nn are provided primarily to make it easy to use those operations 
+    in an nn.Sequential container. Otherwise it’s simplest to use the functional form for any operations that don’t 
+    have trainable or configurable parameters.
+'''
 from torch.autograd import Variable
-
 
 class CNN_Text(nn.Module):
     
-    def __init__(self, args):
+    def __init__(self, args, vocab):
         super(CNN_Text, self).__init__()
+        '''
+            args: command-line arguments with model hyper-parameters            
+        '''
         self.args = args
-        
-        V = args.embed_num
-        D = args.embed_dim
-        C = args.class_num
-        Ci = 1
-        Co = args.kernel_num
-        Ks = args.kernel_sizes
 
-        self.embed = nn.Embedding(V, D)
-        # self.convs1 = [nn.Conv2d(Ci, Co, (K, D)) for K in Ks]
-        self.convs1 = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
-        '''
-        self.conv13 = nn.Conv2d(Ci, Co, (3, D))
-        self.conv14 = nn.Conv2d(Ci, Co, (4, D))
-        self.conv15 = nn.Conv2d(Ci, Co, (5, D))
-        '''
+        vocab_size = vocab.vocab_size_pretrain
+        emb_dim = vocab.emb_dim
+        class_num = args.class_num
+        input_channels = 1
+        output_channels = args.kernel_num
+        kernel_sizes = args.kernel_sizes
+
+        self.embed = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+        # initialize with pre-trained embeddings
+        if vocab.pretrain_embeddings is not None:
+            self.embed.weight = nn.Parameter(torch.from_numpy(vocab.pretrain_embeddings))
+            if self.args.static: self.embed.requires_grad = False
+
+        self.convs1 = nn.ModuleList([nn.Conv2d(input_channels, output_channels, (k, emb_dim)) for k in kernel_sizes])
+
         self.dropout = nn.Dropout(args.dropout)
-        self.fc1 = nn.Linear(len(Ks)*Co, C)
+        self.fc1 = nn.Linear(len(kernel_sizes)*output_channels, class_num) # default: bias=True
 
-    def conv_and_pool(self, x, conv):
-        x = F.relu(conv(x)).squeeze(3)  # (N, Co, W)
-        x = F.max_pool1d(x, x.size(2)).squeeze(2)
-        return x
+        # kaiming initialization
+        for conv in self.convs1: nn.init.kaiming_uniform(conv.weight)
+        nn.init.kaiming_uniform(self.fc1.weight)
 
     def forward(self, x):
-        x = self.embed(x)  # (N, W, D)
-        
-        if self.args.static:
-            x = Variable(x)
 
-        x = x.unsqueeze(1)  # (N, Ci, W, D)
-
-        x = [F.relu(conv(x)).squeeze(3) for conv in self.convs1]  # [(N, Co, W), ...]*len(Ks)
-
-        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]  # [(N, Co), ...]*len(Ks)
-
-        x = torch.cat(x, 1)
-
+        x = self.embed(x)  # (batch_size, sequence_length, emb_dim)
         '''
-        x1 = self.conv_and_pool(x,self.conv13) #(N,Co)
-        x2 = self.conv_and_pool(x,self.conv14) #(N,Co)
-        x3 = self.conv_and_pool(x,self.conv15) #(N,Co)
-        x = torch.cat((x1, x2, x3), 1) # (N,len(Ks)*Co)
+            A PyTorch Variable is a wrapper around a PyTorch Tensor, and represents a node in a computational graph. 
+            If x is a Variable then x.data is a Tensor giving its value, 
+            and x.grad is another Variable holding the gradient of x with respect to some scalar value.
         '''
-        x = self.dropout(x)  # (N, len(Ks)*Co)
-        logit = self.fc1(x)  # (N, C)
+        # if self.args.static:
+        #     x = Variable(x)
+
+        # Input (N,Cin,Hin,Win) : (batch_size, input_channels=1, sequence_length, emb_dim)
+        x = x.unsqueeze(1)
+
+        # Output (N,Cout,Hout,Wout) : (batch_size, output_channels, sequence_length, 1)
+        conv_out = [F.relu(conv(x)).squeeze(3) for conv in self.convs1]
+
+        # kernel_size : the size of the window to take a max over
+        pool_out = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in conv_out] # (batch_size, output_channels)
+
+        cat_out = torch.cat(pool_out, 1)
+
+        cat_out_dropout = self.dropout(cat_out)  # (batch_size, types_of_kernels*output_channels)
+
+        logit = self.fc1(cat_out_dropout)  # (batch_size, class_num)
+
         return logit

@@ -1,4 +1,4 @@
-import torch
+import torch, sys
 import torch.nn as nn
 import torch.nn.functional as F
 '''
@@ -30,18 +30,23 @@ class CNN_Text(nn.Module):
             self.embed.weight = nn.Parameter(torch.from_numpy(vocab.pretrain_embeddings))
             if self.args.static: self.embed.requires_grad = False
 
-        self.convs1 = nn.ModuleList([nn.Conv2d(input_channels, output_channels, (k, emb_dim)) for k in kernel_sizes])
+        self.convs1 = nn.ModuleList([nn.Conv2d(input_channels, output_channels, (k, emb_dim), padding=((k-1)//2, 0))
+                                     for k in kernel_sizes])
+        self.convs2 = nn.ModuleList([nn.Conv2d(input_channels, output_channels, (k, emb_dim), padding=((k-1)//2, 0))
+                                     for k in kernel_sizes])
 
         self.dropout = nn.Dropout(args.dropout)
-        self.fc1 = nn.Linear(len(kernel_sizes)*output_channels, class_num) # default: bias=True
+        self.fc1 = nn.Linear(len(kernel_sizes)*output_channels*2, class_num) # default: bias=True
 
         # kaiming initialization
         for conv in self.convs1: nn.init.kaiming_uniform(conv.weight)
+        for conv in self.convs2: nn.init.kaiming_uniform(conv.weight)
         nn.init.kaiming_uniform(self.fc1.weight)
 
-    def forward(self, x):
+    def forward(self, query, doc):
 
-        x = self.embed(x)  # (batch_size, sequence_length, emb_dim)
+        query = self.embed(query)  # (batch_size, sequence_length, emb_dim)
+        doc = self.embed(doc)  # (batch_size, sequence_length, emb_dim)
         '''
             A PyTorch Variable is a wrapper around a PyTorch Tensor, and represents a node in a computational graph. 
             If x is a Variable then x.data is a Tensor giving its value, 
@@ -51,18 +56,36 @@ class CNN_Text(nn.Module):
         #     x = Variable(x)
 
         # Input (N,Cin,Hin,Win) : (batch_size, input_channels=1, sequence_length, emb_dim)
-        x = x.unsqueeze(1)
+        query = query.unsqueeze(1)
+        doc = doc.unsqueeze(1)
 
         # Output (N,Cout,Hout,Wout) : (batch_size, output_channels, sequence_length, 1)
-        conv_out = [F.relu(conv(x)).squeeze(3) for conv in self.convs1]
+        query_conv_out = [F.relu(conv(query)).squeeze(3) for conv in self.convs1]
+        doc_conv_out = [F.relu(conv(doc)).squeeze(3) for conv in self.convs2]
+
+        # temp = query_conv_out[0].permute(0,2,1) * doc_conv_out[0].permute(0,2,1)
+        # print(temp)
+        # sys.exit(0)
 
         # kernel_size : the size of the window to take a max over
-        pool_out = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in conv_out] # (batch_size, output_channels)
+        query_pool_out = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in query_conv_out] # (batch_size, output_channels)
+        doc_pool_out = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in doc_conv_out] # (batch_size, output_channels)
 
-        cat_out = torch.cat(pool_out, 1)
+        query_cat_out = torch.cat(query_pool_out, 1)
+        doc_cat_out = torch.cat(doc_pool_out, 1)
 
-        cat_out_dropout = self.dropout(cat_out)  # (batch_size, types_of_kernels*output_channels)
+        final_cat_out = torch.cat([query_cat_out, doc_cat_out], 1)
+
+        cat_out_dropout = self.dropout(final_cat_out)  # (batch_size, types_of_kernels*output_channels)
 
         logit = self.fc1(cat_out_dropout)  # (batch_size, class_num)
+
+        # for i in [query_conv_out, doc_conv_out, query_pool_out, doc_pool_out]:
+        #     for x in i:
+        #         print(x.size())
+        # for i in [query_cat_out, doc_cat_out, final_cat_out, cat_out_dropout, logit]:
+        #     print(i.size())
+
+        # sys.exit(0)
 
         return logit

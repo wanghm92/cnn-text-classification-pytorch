@@ -42,11 +42,16 @@ class QAngarooDataReader(object):
             self._all_items_raw = json.load(fin)
 
         # process samples
+        max_query_length = 0
         for i, item in enumerate(self.get_all_items_raw()):
 
             query_tuple = item[QUERY].split()
             query_rel = query_tuple[0]  # string with '_' between words
             query_ent = ' '.join(query_tuple[1:]).lower()  # multi-word string
+
+            query_length = len(query_ent.split()) + len(query_rel.split('_'))
+            if query_length > max_query_length: max_query_length = query_length
+
             answer_ent = item[ANSWER].lower()  # string
             candidates = [x.lower() for x in item[CAND]]
             support_docs = [x.strip().lower() for x in item[DOCS]]
@@ -80,7 +85,7 @@ class QAngarooDataReader(object):
         for i, item in enumerate(self.get_all_items_after()):
 
             query_tokens = item[QUERY][0].split('_') + item[QUERY][1].split()
-            query_indices = self.sent2idx(query_tokens) if not self.concat else None
+            query_indices = self.sent2idx(query_tokens, max_length=20) if not self.concat else None
             answer = item[ANSWER]
 
             label_sum = 0
@@ -100,15 +105,6 @@ class QAngarooDataReader(object):
                     positive_samples.append((query_indices, doc_indices, doc_label))
 
                 label_sum += doc_label
-                '''
-                if self.is_test:
-                    # only test on positive samples
-                    if doc_label == 1:
-                        tuples.append((query_indices, doc_indices, doc_label))
-                    else:
-                        continue
-                else:
-                '''
                 tuples.append((query_indices, doc_indices, doc_label))
 
             # only include samples with answers present in the supporting documents
@@ -143,6 +139,7 @@ class QAngarooDataReader(object):
 
     def sent2idx(self, tokens, max_length=500):
         sent_ids = [self.vocab.get_index_pretrain(word) for word in tokens]
+        # zero paddings to equal length
         if len(sent_ids) < max_length: sent_ids = sent_ids + [self.vocab.PAD] * (max_length - len(sent_ids))
         return sent_ids[:max_length]
 

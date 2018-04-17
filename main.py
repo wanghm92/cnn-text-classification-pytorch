@@ -1,4 +1,4 @@
-import os, argparse, datetime, logging, codecs, sys
+import os, argparse, datetime, logging, codecs, sys, warnings
 import model, train
 import torch
 from qangaroo_data_reader import QAngarooDataReader
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     parser.add_argument('-embed-dim', type=int, default=100, help='number of embedding dimension [default: 100]')
     parser.add_argument('-class_num', type=int, default=2, help='number of output classes [default: 100]')
     parser.add_argument('-kernel_num', type=int, default=300, help='number of each kind of kernel')
-    parser.add_argument('-kernel_sizes', type=str, default='3,4,5', help='kernel sizes for convolution')
+    parser.add_argument('-kernel_sizes', type=str, default='3,5,7', help='kernel sizes for convolution')
     parser.add_argument('-static', action='store_true', default=False, help='fix the embedding')
     # device
     parser.add_argument('-device', type=int, default=0, help='device to use for iterate data, -1=cpu [default: -1]')
@@ -99,12 +99,31 @@ if __name__ == "__main__":
     print("Total number of valid samples = {}".format(valid_set.get_number_of_samples()))
 
     # create model
-    cnn = model.CNN_Text(args, vocab) # TODO: READ
+    cnn = model.CNN_Text(args, vocab)
 
     # load pre-trained model parameters
+    optim_state_dict = None
     if args.snapshot is not None:
-        L.info('Loading model from {}...'.format(args.snapshot))
-        cnn.load_state_dict(torch.load(args.snapshot)) # TODO: READ
+        if os.path.isfile(args.snapshot):
+            L.info('Loading model from {}...'.format(args.snapshot))
+            checkpoint = torch.load(args.snapshot)
+            args.start_epoch = checkpoint['epoch']
+            # current model state dictionary
+            model_dict = cnn.state_dict()
+            # previously saved model state dictionary, may be different
+            pretrained_dict = checkpoint['state_dict']
+            # 1. filter out unwanted keys in previously saved model that do not exist in current model
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            # 2. overwrite/update entries in the existing state dict
+            model_dict.update(pretrained_dict)
+            # 3. load the newly updated state dict
+            cnn.load_state_dict(model_dict)
+            # optimizer loading is done in train.py
+            optim_state_dict = checkpoint['optimizer']
+            L.info("Loaded checkpoint '{}' (epoch {})".format(args.snapshot, checkpoint['epoch']))
+            # cnn.load_state_dict(torch.load(args.snapshot))
+        else:
+            warnings.warn("no checkpoint found at '{}'".format(args.snapshot))
 
     # assign model to GPU
     if args.cuda:
@@ -129,7 +148,7 @@ if __name__ == "__main__":
     else:
         L.info('Start Training ...')
         try:
-            train.train(train_set, valid_set, cnn, args)
+            train.train(train_set, valid_set, cnn, optim_state_dict, args)
         except KeyboardInterrupt:
             print('\n' + '-' * 89)
             L.info('Exiting from training early')
